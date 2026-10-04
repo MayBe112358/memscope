@@ -1,0 +1,10 @@
+{
+  "name": "memscope",
+  "version": "1.0.0",
+  "description": "内存显微镜：逐步运行代码，可视化栈、堆、指针与数据结构",
+  "private": true,
+  "scripts": {
+    "build": "node build.js",
+    "test": "node test/examples.test.js"
+  }
+}
