@@ -52,7 +52,7 @@
         if (d.k === 'map') { d.entries.forEach((en, i) => { const kk = leaf(en.key); walk(base, (path ? path + '.' : '') + 'k:' + kk, en.val); }); return; }
         m.set(base + '#' + path, leaf(d));
       };
-      const frames = snap.globals ? [snap.globals].concat(snap.frames) : snap.frames;
+      const frames = (snap.globals ? [snap.globals].concat(snap.frames) : snap.frames).concat(snap.extraFrames || []);
       for (const f of frames) for (const v of f.vars) walk('F' + f.id + '/' + v.name, '', v.val);
       for (const h of snap.heap) walk('H' + h.id, '', h.val);
       snap._sig = m;
@@ -363,14 +363,18 @@
 
       // ----- stack -----
       let sh = '';
-      const allFrames = (snap.globals ? [snap.globals] : []).concat(snap.frames);
+      let allFrames = (snap.globals ? [snap.globals] : []).concat(snap.frames);
+      if (snap.envMode && snap.extraFrames && snap.extraFrames.length) allFrames = allFrames.concat(snap.extraFrames).sort((a, b) => (a.seq || 0) - (b.seq || 0));
       const topId = snap.frames.length ? snap.frames[snap.frames.length - 1].id : null;
       if (!allFrames.length) sh += '<div class="frame done"><div class="fh"><span class="fname">（程序已结束，栈已清空）</span></div></div>';
       for (const f of allFrames) {
         const isTop = f.id === topId;
         const isGlob = f.id === 'globals' || f.id === 'g';
-        sh += '<div class="frame' + (isTop ? ' top' : '') + (isGlob ? ' glob' : '') + (f.ret ? ' returning' : '') + '" data-fid="' + f.id + '">';
-        sh += '<div class="fh"><span class="fname">' + esc(f.name) + '</span>' + (f.line && !isGlob ? '<span class="fline">第 ' + f.line + ' 行</span>' : '') + '</div>';
+        sh += '<div class="frame' + (isTop ? ' top' : '') + (isGlob ? ' glob' : '') + (f.ret ? ' returning' : '') + (f.exited ? ' exited' : '') + '" data-fid="' + f.id + '">';
+        if (f.label) {
+          const nm = f.label === 'Global' ? '<span class="fname">Global 全局帧</span>' : '<span class="fname"><span class="flab">' + esc(f.label) + '</span>: ' + esc(f.name) + (f.lambdaLine ? ' <span class="fpar">&lt;第 ' + f.lambdaLine + ' 行&gt;</span>' : '') + ' <span class="fpar">[parent=' + esc(f.parent || 'Global') + ']</span></span>';
+          sh += '<div class="fh"' + (f.exited ? ' title="这个函数已经返回。帧仍然保留在环境图里：如果有函数的 parent 指向它（闭包），里面的变量之后还会被用到。"' : '') + '>' + nm + (!f.exited && f.line && !isGlob ? '<span class="fline">第 ' + f.line + ' 行</span>' : '') + '</div>';
+        } else sh += '<div class="fh"><span class="fname">' + esc(f.name) + '</span>' + (f.line && !isGlob ? '<span class="fline">第 ' + f.line + ' 行</span>' : '') + '</div>';
         const vars = settings.showFuncs ? f.vars : f.vars.filter(v => !(v.val.k === 'func' && isGlob));
         if (!vars.length && !f.ret) sh += '<div class="fempty">（没有变量）</div>';
         sh += '<table class="vars"><tbody>';
@@ -385,7 +389,7 @@
         }
         if (f.ret) {
           const ctx = Object.assign({}, ctx0, { sigBase: 'R' + f.id });
-          sh += '<tr class="ret"><td class="vn">返回值</td><td class="vv">' + this.valHTML(f.ret, 'R' + f.id, '', ctx) + '</td></tr>';
+          sh += '<tr class="ret"><td class="vn">' + (snap.envMode ? 'Return value' : '返回值') + '</td><td class="vv">' + this.valHTML(f.ret, 'R' + f.id, '', ctx) + '</td></tr>';
         }
         sh += '</tbody></table></div>';
       }
@@ -419,6 +423,7 @@
         else if (v.k === 'arr') body = this.arrHTML(v, ent.id, '', ctx, 0, vert);
         else if (v.k === 'list') body = this.listHTML(v, ent.id, ctx, vert);
         else if (v.k === 'map') body = this.mapHTML(v, ent.id, ctx);
+        else if (v.k === 'fnobj') body = '<div class="fnobj"><span class="fkw">func</span> ' + (v.arrow ? (v.name ? esc(v.name) + ' = ' : '') + '(' + esc(v.params) + ') =>' : esc(v.name || '(匿名)') + '(' + esc(v.params) + ')') + (v.line ? ' <span class="fpar">&lt;第 ' + v.line + ' 行&gt;</span>' : '') + (v.builtin ? '' : ' <span class="fpar">[parent=' + esc(v.parent) + ']</span>') + '</div>';
         else body = '<div class="rawv">' + this.valHTML(v, ent.id, '', ctx) + '</div>';
         const f = Object.assign({}, ent.flags || {});
         if (ent.born !== undefined && extra && extra.idx !== undefined && ent.born === extra.idx) f.fresh = true;

@@ -624,14 +624,17 @@
         case 'bigint': return { k: 'prim', text: v + 'n', type: 'bigint' };
         case 'string': return { k: 'str', text: strEscape(v.length > 300 ? v.slice(0, 300) + '…' : v) };
       }
+      if (envMode && v instanceof JSFunc && !v.isClass) { if (!heapSeen.has(v)) { heapSeen.add(v); order.push(v); } return { k: 'ref', id: v.id }; }
       if (v instanceof JSFunc) return { k: 'func', text: funcText(v) };
       if (v.isSymbol) return { k: 'prim', text: 'Symbol()' };
       if (v instanceof JSRegExp) return { k: 'prim', text: String(v.re) };
       if (!heapSeen.has(v)) { heapSeen.add(v); order.push(v); }
       return { k: 'ref', id: v.id };
     };
+    const envMode = this.envMode;
     const frames = [];
-    for (const f of this.frames) {
+    const extraFrames = envMode ? [] : null;
+    for (const f of this.frames.concat(envMode ? this.exitedFrames : [])) {
       const scopes = [];
       const stop = f.isGlobal ? this.globalScope : f.fnScope;
       for (let s = f.scope; s; s = s.parent) { scopes.push(s); if (s === stop) break; }
@@ -644,9 +647,16 @@
       }
       const fr = { id: f.id, name: f.name, vars, line: f.line };
       if (f.returning) fr.ret = desc(f.retVal);
+      if (envMode) {
+        if (f.isGlobal) { fr.label = 'Global'; fr.seq = 0; }
+        else { fr.label = f.label; fr.parent = f.parent; fr.seq = f.seq; if (f.fn && !f.fn.fname && f.fn.node) fr.lambdaLine = f.fn.node.line; }
+        if (f.exited) { fr.exited = true; extraFrames.push(fr); continue; }
+      }
       frames.push(fr);
     }
-    if (reuseHeap) return { frames, globals: null, heap: reuseHeap, lang: this.ts ? 'ts' : 'js', showAddr: false };
+    const tail = { lang: this.ts ? 'ts' : 'js', showAddr: false };
+    if (envMode) { tail.envMode = true; tail.extraFrames = extraFrames; }
+    if (reuseHeap) return Object.assign({ frames, globals: null, heap: reuseHeap }, tail);
     const heap = [];
     for (let i = 0; i < order.length && heap.length < 600; i++) {
       const o = order[i];
@@ -658,7 +668,14 @@
         heap.push({ id: o.id, label: o._dcLabel, val: o._dcVal, flags, kind: 'js', born: o.born });
         continue;
       }
-      if (o instanceof JSArr) ent = { label: 'Array', val: { k: 'list', kind: 'array', items: o.items.slice(0, 150).map(desc), total: o.items.length } };
+      if (o instanceof JSFunc) {
+        if (o.native || o.bound) ent = { label: '内置函数', val: { k: 'fnobj', name: o.bound ? 'bound ' + (o.bound.target.fname || '') : o.fname, params: '...', builtin: true } };
+        else {
+          const ps = o.node ? o.node.params.map(p => p.type === 'Id' ? p.name : p.type === 'Rest' ? '...' + (p.arg.name || '') : p.type === 'Default' ? (p.target.name || '?') + '=…' : '{…}').join(', ') : '';
+          ent = { label: '函数', val: { k: 'fnobj', name: o.fname || '', arrow: !!(o.node && o.node.arrow), params: ps, line: o.fname ? null : (o.node ? o.node.line : null), parent: o.parentLabel || 'Global' } };
+        }
+      }
+      else if (o instanceof JSArr) ent = { label: 'Array', val: { k: 'list', kind: 'array', items: o.items.slice(0, 150).map(desc), total: o.items.length } };
       else if (o instanceof JSMap) ent = { label: 'Map', val: { k: 'map', entries: [...o.m.values()].slice(0, 150).map(e => ({ key: desc(e[0]), val: desc(e[1]) })), total: o.m.size } };
       else if (o instanceof JSSet) ent = { label: 'Set', val: { k: 'list', kind: 'set', items: [...o.m.values()].slice(0, 150).map(desc), total: o.m.size } };
       else if (o instanceof JSGen) ent = { label: 'Generator', val: { k: 'list', kind: 'iter', items: o.items.slice(o.i, o.i + 100).map(desc), total: o.items.length - o.i } };
@@ -675,12 +692,12 @@
         const label = cn && cn !== 'Object' ? cn : (cn === null ? 'Object' : 'Object');
         ent = { label, val: { k: 'struct', name: label, fields } };
         if (this.isError(o)) flags.exc = true;
-        else if (plain) { o._dcVer = o.props.ver; o._dcVal = ent.val; o._dcLabel = label; o._dcKids = []; for (const s of o.props.values()) if (s && !s.acc && isObj(s.v) && !(s.v instanceof JSFunc) && !s.v.isSymbol && !(s.v instanceof JSRegExp)) o._dcKids.push(s.v); }
+        else if (plain) { o._dcVer = o.props.ver; o._dcVal = ent.val; o._dcLabel = label; o._dcKids = []; for (const s of o.props.values()) if (s && !s.acc && isObj(s.v) && !(s.v instanceof JSFunc && (!envMode || s.v.isClass)) && !s.v.isSymbol && !(s.v instanceof JSRegExp)) o._dcKids.push(s.v); }
       }
       ent.id = o.id; ent.flags = flags; ent.kind = 'js'; ent.born = o.born;
       heap.push(ent);
     }
-    return { frames, globals: null, heap, lang: this.ts ? 'ts' : 'js', showAddr: false };
+    return Object.assign({ frames, globals: null, heap }, tail);
   };
 
   function runJS(ts) {

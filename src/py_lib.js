@@ -816,6 +816,7 @@
         case 'number': return V2('prim', floatRepr(v), 'float');
         case 'string': { const r = strRepr(v.length > 300 ? v.slice(0, 300) + '…' : v); return { k: 'str', text: r }; }
       }
+      if (envMode && (v instanceof PyFunc || (v instanceof PyBuiltin && !v.wrapped))) { if (!heapMap.has(v)) { heapMap.set(v, null); order.push(v); } return { k: 'ref', id: v.id }; }
       if (v instanceof PyFunc) return { k: 'func', text: (v.def.isLambda ? 'λ ' : 'function ') + v.name + '(' + v.def.params.map(p => (p.kind === 'varargs' ? '*' : p.kind === 'kwargs' ? '**' : '') + p.name).join(', ') + ')' };
       if (v instanceof PyClass) return { k: 'func', text: 'class ' + v.name };
       if (v instanceof PyBuiltin) return { k: 'func', text: v.wrapped ? 'function ' + v.wrapped.name + ' (带缓存)' : 'built-in ' + v.name };
@@ -830,8 +831,8 @@
       return V2('prim', String(v));
     };
     const V2 = (k, text, type) => ({ k, text, type });
-    const frames = [];
-    for (const f of this.frames) {
+    const envMode = this.envMode;
+    const descFrame = (f) => {
       const env = f.isGlobal ? this.globalEnv : f.env;
       const vars = [];
       for (const [k, v] of env.vars) {
@@ -840,9 +841,18 @@
       }
       const fr = { id: f.id, name: f.name, vars, line: f.line };
       if (f.returning) fr.ret = desc(f.retVal);
-      frames.push(fr);
-    }
-    if (reuseHeap) return { frames, globals: null, heap: reuseHeap, lang: 'python', showAddr: false };
+      if (envMode) {
+        if (f.isGlobal) { fr.label = 'Global'; fr.seq = 0; }
+        else { fr.label = f.label; fr.parent = f.parent; fr.seq = f.seq; if (f.fn && f.fn.def.isLambda) fr.lambdaLine = f.fn.def.line; }
+        if (f.exited) fr.exited = true;
+      }
+      return fr;
+    };
+    const frames = this.frames.map(descFrame);
+    const extraFrames = envMode ? this.exitedFrames.map(descFrame) : null;
+    const tail = { lang: 'python', showAddr: false };
+    if (envMode) { tail.envMode = true; tail.extraFrames = extraFrames; }
+    if (reuseHeap) return Object.assign({ frames, globals: null, heap: reuseHeap }, tail);
     const heap = [];
     for (let i = 0; i < order.length && heap.length < 600; i++) {
       const o = order[i];
@@ -865,16 +875,22 @@
         if (o.isEnumMember) ent = { label: o.cls.name, val: { k: 'struct', name: o.cls.name + '.' + o.attrs.get('name'), fields: [{ name: 'value', val: desc(o.attrs.get('value')) }] } };
         else {
           ent = { label: o.cls.name, val: { k: 'struct', name: o.cls.name, fields: [...o.attrs].map(([k, v]) => ({ name: k, val: desc(v) })) } };
-          o._dcVer = o.attrs.ver; o._dcVal = ent.val; o._dcKids = [...o.attrs.values()].filter(v => v && typeof v === 'object' && v.id && !(v instanceof PyFunc || v instanceof PyClass || v instanceof PyBuiltin || v instanceof PyBound || v instanceof PyModule || v instanceof PyRange || v instanceof PyStatic || v instanceof PyClassMethod || v instanceof PyProperty || v instanceof PySuper));
+          o._dcVer = o.attrs.ver; o._dcVal = ent.val; o._dcKids = [...o.attrs.values()].filter(v => v && typeof v === 'object' && v.id && !((!envMode && (v instanceof PyFunc || v instanceof PyBuiltin)) || v instanceof PyClass || v instanceof PyBound || v instanceof PyModule || v instanceof PyRange || v instanceof PyStatic || v instanceof PyClassMethod || v instanceof PyProperty || v instanceof PySuper));
         }
         if (this.isExcClass(o.cls)) flags.exc = true;
       }
+      else if (o instanceof PyFunc) {
+        const d = o.def;
+        const ps = d.params.map(p => (p.kind === 'varargs' ? '*' : p.kind === 'kwargs' ? '**' : '') + p.name).join(', ');
+        ent = { label: '函数', val: { k: 'fnobj', name: d.isLambda ? 'λ' : o.name, params: ps, line: d.isLambda ? d.line : null, parent: o.parentLabel || 'Global', cls: o.cls ? o.cls.name : null } };
+      }
+      else if (o instanceof PyBuiltin) ent = { label: '内置函数', val: { k: 'fnobj', name: o.name, params: '...', builtin: true } };
       else if (o instanceof PyIter) ent = { label: o.label, val: { k: 'list', kind: 'iter', items: o.items.slice(o.i, o.i + 100).map(desc), total: o.items.length - o.i } };
       else continue;
       ent.id = o.id; ent.flags = flags; ent.kind = 'py'; ent.born = o.born;
       heap.push(ent);
     }
-    return { frames, globals: null, heap, lang: 'python', showAddr: false };
+    return Object.assign({ frames, globals: null, heap }, tail);
   };
 
   DSV.langs.python = {

@@ -2105,8 +2105,107 @@ const order = topoSort(courses.length, prereq);
 console.log(order.map(i => courses[i]).join(" → "));
 `, { desc: 'indegree 记录每门课还差几门先修课。入度为 0 的课进入 queue；出队一门，就把它指向的课入度减 1。' });
 
+  add('python', 'py-hof', '高阶函数：make_adder 与 compose', `
+# 高阶函数与环境图（CS61A 风格）
+# 看点：每次调用都会新建一个帧 f1、f2…，它的 parent 是“函数被定义时所在的帧”，
+# 而不是调用它的地方。查找变量时，先找当前帧，找不到就沿着 parent 往上找。
+
+def make_adder(n):
+    def adder(k):
+        return k + n        # n 不在 adder 的帧里，要去 parent（make_adder 的帧）找
+    return adder
+
+def compose1(f, g):
+    def h(x):
+        return f(g(x))
+    return h
+
+square = lambda x: x * x
+add_three = make_adder(3)
+f = compose1(square, add_three)
+result = f(2)
+print(result)
+`, { desc: '左边的每个帧都标着 f1: 函数名 [parent=…]。函数被画成对象，它的 parent 是定义它时所在的帧。已经返回的帧会变灰但保留，方便对照 CS61A 的环境图。' });
+
+  add('python', 'py-closure', '闭包与 nonlocal：计数器', `
+# 闭包与 nonlocal：计数器
+# make_counter 返回之后，它的帧并没有消失——counter 的 parent 还指着它，
+# 所以 count 一直“活着”。两个计数器各有自己的帧，互不影响。
+
+def make_counter():
+    count = 0
+    def counter():
+        nonlocal count      # 修改的是 parent 帧里的 count
+        count += 1
+        return count
+    return counter
+
+a = make_counter()
+b = make_counter()
+a()
+a()
+b()
+print(a(), b())
+`, { desc: 'make_counter 返回后，它的帧仍被 counter 的 parent 引用，所以 count 一直存在。a 和 b 是两个独立的闭包，各自指向不同的帧。' });
+
+  add('python', 'py-curry', '柯里化与 apply_twice', `
+# 柯里化与函数作为参数（CS61A Lecture 5 风格）
+
+def curry2(f):
+    def g(x):
+        def h(y):
+            return f(x, y)
+        return h
+    return g
+
+def apply_twice(f, x):
+    return f(f(x))
+
+from operator import add, mul
+
+add_curried = curry2(add)
+add_five = add_curried(5)
+print(add_five(10))
+print(apply_twice(add_five, 1))
+print(curry2(mul)(3)(4))
+`, { desc: '函数可以当参数传、当返回值。注意 curry2 里三层嵌套：h 的 parent 是 g 的帧，g 的 parent 是 curry2 的帧，查找 f、x 时会一层层往上找。' });
+
+  add('js', 'js-closure', '闭包与高阶函数：makeAdder / compose / 计数器', `
+// 闭包与高阶函数（环境图）
+// 每次调用新建一个帧 f1、f2…；函数对象记住“创建它时所在的帧”（parent）。
+// 找变量时：当前帧 → parent → parent 的 parent … → Global
+
+function makeAdder(n) {
+  return function adder(k) {
+    return k + n;          // n 来自 parent 帧（makeAdder 的帧）
+  };
+}
+
+const compose = (f, g) => x => f(g(x));
+const square = x => x * x;
+
+const addThree = makeAdder(3);
+const h = compose(square, addThree);
+console.log(h(2));
+
+function makeCounter() {
+  let count = 0;
+  return () => {
+    count += 1;            // 修改的是 makeCounter 帧里的 count
+    return count;
+  };
+}
+
+const a = makeCounter();
+const b = makeCounter();
+a();
+a();
+console.log(a(), b());
+`, { desc: '帧标题写着 f1: 函数名 [parent=…]，函数画成对象并标出 parent。makeCounter 返回后它的帧仍然保留（变灰），因为返回的箭头函数还在用里面的 count。' });
+
   // 分类（下拉框里按组显示）
   const CAT = {
+    'py-hof': '高阶函数 · 环境图', 'py-closure': '高阶函数 · 环境图', 'py-curry': '高阶函数 · 环境图', 'js-closure': '高阶函数 · 环境图',
     'c-tideman': '图', 'c-graph-bfs': '图', 'cpp-graph': '图', 'cpp-dijkstra': '图', 'java-graph': '图', 'py-bfs': '图', 'py-dijkstra': '图', 'py-unionfind': '图', 'py-islands': '图', 'js-topo': '图',
     'c-bst': '树', 'c-trie': '树', 'c-inheritance': '树', 'cpp-bst': '树', 'java-bst': '树', 'py-bst': '树', 'js-tree': '树',
     'c-list-argv': '链表', 'c-list-ops': '链表', 'cpp-list': '链表', 'java-list': '链表', 'py-list': '链表', 'js-list': '链表', 'ts-list': '链表',
@@ -2114,7 +2213,7 @@ console.log(order.map(i => courses[i]).join(" → "));
     'c-hash': '哈希表 · 字典', 'java-hashmap': '哈希表 · 字典', 'py-dict': '哈希表 · 字典', 'js-map': '哈希表 · 字典',
     'c-sort': '排序 · 递归', 'c-recursion': '排序 · 递归', 'py-sort': '排序 · 递归', 'py-recursion': '排序 · 递归',
   };
-  DSV.exCats = ['图', '树', '链表', '栈 · 队列 · 堆', '哈希表 · 字典', '排序 · 递归', '基础'];
+  DSV.exCats = ['高阶函数 · 环境图', '图', '树', '链表', '栈 · 队列 · 堆', '哈希表 · 字典', '排序 · 递归', '基础'];
   for (const e of E) e.cat = CAT[e.id] || '基础';
 
   DSV.examples = E;

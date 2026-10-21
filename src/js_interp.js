@@ -45,6 +45,18 @@
       this.curLine = 0;
       this.warned = new Set();
       this.setupGlobals();
+      this.globalScope.label = 'Global';
+      this.envMode = !!this.opts.envMode;
+      this.callSeq = 0;
+      this.exitedFrames = [];
+    }
+    labelOf(scope) { let s = scope; while (s && !s.label) s = s.parent; return s ? s.label : 'Global'; }
+    labelScopeOf(scope) { let s = scope; while (s && !s.label) s = s.parent; return s; }
+    envNote(key, text) {
+      if (this._notedStep !== this.rec.steps.length) { this._notedStep = this.rec.steps.length; this._noted = new Set(); }
+      if (this._noted.has(key)) return;
+      this._noted.add(key);
+      this.rec.note(text, 'info');
     }
     get frame() { return this.frames[this.frames.length - 1]; }
     get scope() { return this.frame.scope; }
@@ -171,7 +183,16 @@
 
     // ================= variables =================
     lookupRef(name) {
-      for (let s = this.scope; s; s = s.parent) { const v = s.vars.get(name); if (v) return v; }
+      for (let s = this.scope; s; s = s.parent) {
+        const v = s.vars.get(name);
+        if (v) {
+          if (this.envMode && !v.builtin && this.frame && !this.frame.isGlobal) {
+            const home = this.labelScopeOf(s);
+            if (home && home.kind === 'function' && home !== this.frame.fnScope) this.envNote(name, '当前帧 ' + this.frame.fnScope.label + ' 里没有 ' + name + '，沿父帧往上找，在 ' + home.label + ' 中找到 ' + name + ' = ' + this.shortInspect(v.v));
+          }
+          return v;
+        }
+      }
       return null;
     }
     getVar(name) {
@@ -188,6 +209,10 @@
       if (r.kind === 'const') this.throwErr('TypeError', 'Assignment to constant variable.');
       if (r.builtin) this.throwErr('TypeError', '不能修改内置对象 ' + name);
       if (isObj(v) || isObj(r.v)) VER++;
+      if (this.envMode) {
+        VER++;
+        if (this.frame && !this.frame.isGlobal) { let s = this.scope; while (s && !s.vars.has(name)) s = s.parent; const home = this.labelScopeOf(s); if (home && home.kind === 'function' && home !== this.frame.fnScope) this.envNote('set:' + name, '赋值：修改的是父帧 ' + home.label + ' 里的 ' + name + '（闭包共享这个变量）'); }
+      }
       r.v = v;
     }
     declare(scope, name, v, kind) {
@@ -243,7 +268,7 @@
     }
     evalNamed(e, target) {
       const v = this.eval(e);
-      if (v instanceof JSFunc && !v.fname && target && target.type === 'Id') v.fname = target.name;
+      if (v instanceof JSFunc && !v.fname && target && target.type === 'Id' && (e.type === 'Function' || e.type === 'Class')) v.fname = target.name;
       return v;
     }
     varScope() { for (let s = this.scope; s; s = s.parent) if (s.kind === 'function' || s.kind === 'global') return s; return this.globalScope; }
@@ -473,6 +498,10 @@
       f.env = scope;
       f.fname = node.name || '';
       f.homeObject = homeObject || null;
+      const hs = this.labelScopeOf(scope);
+      f.parentLabel = hs ? hs.label : 'Global';
+      if (hs && hs.kind === 'function') hs.captured = true;
+      if (this.envMode && !homeObject && !node.isMethod) this.rec.note((node.name ? '定义函数 ' + node.name : '创建' + (node.arrow ? '箭头函数' : '匿名函数') + '（第 ' + node.line + ' 行）') + '：函数对象的父帧 = ' + f.parentLabel + '（创建它时所在的帧）', 'info');
       if (!node.arrow && !node.isMethod) {
         const proto = this.newObject();
         proto.props.set('constructor', new Slot(f, false));
@@ -533,17 +562,22 @@
       if (!(f instanceof JSFunc)) {
         this.throwErr('TypeError', this.inspect(f) + ' is not a function');
       }
-      if (f.native) { VER++; const r = f.native.call(this, thisV, args, newTarget); VER++; return r; }
+      if (f.native) { VER++; const sv = this.builtinDepth || 0; this.builtinDepth = sv + 1; let r; try { r = f.native.call(this, thisV, args, newTarget); } finally { this.builtinDepth = sv; } VER++; return r; }
       if (f.bound) return this.callFunction(f.bound.target, f.bound.thisV, f.bound.args.concat(args), newTarget, line);
       if (f.isClass && !newTarget) this.throwErr('TypeError', "Class constructor " + f.fname + " cannot be invoked without 'new'", '类需要用 new 来创建对象：new ' + f.fname + '(...)');
       if (this.frames.length > this.depthLimit) this.throwErr('RangeError', 'Maximum call stack size exceeded', '递归层数太深（可视化器上限 ' + this.depthLimit + ' 层）。检查递归函数是否有正确的终止条件（base case）。');
       const node = f.node;
       const sc = new Scope(f.env, 'function');
       sc.fn = f;
+      const fromBuiltin = (this.builtinDepth || 0) > 0;
+      const saveBD = this.builtinDepth || 0;
+      this.builtinDepth = 0;
+      const seq = ++this.callSeq;
+      sc.label = 'f' + seq;
       if (node && node.arrow) sc.arrow = true;
       else { sc.thisVal = thisV; sc.newTarget = newTarget; sc.homeObject = f.homeObject; }
       const name = this.funcDisplayName(f, thisV);
-      const frame = { id: 'f' + (++NID), name, scope: sc, fnScope: sc, fn: f, line: node ? node.line : 0, callLine: this.curLine, thisV: node && !node.arrow ? thisV : undefined };
+      const frame = { id: 'f' + (++NID), name, scope: sc, fnScope: sc, fn: f, line: node ? node.line : 0, callLine: this.curLine, thisV: node && !node.arrow ? thisV : undefined, seq, label: sc.label, parent: f.parentLabel || 'Global' };
       if (node && node.gen) frame.yields = [];
       // arguments object
       if (node && !node.arrow) { const a = this.newArray(args.slice()); sc.vars.set('arguments', { v: a, kind: 'var', hidden: true }); }
@@ -562,6 +596,7 @@
       let msg = (newTarget ? 'new ' : '调用 ') + name + '(' + shown.join(', ') + ')';
       const depth = this.frames.filter(fr => fr.fn === f).length;
       if (depth > 1) msg += '（递归，第 ' + depth + ' 层）';
+      if (this.envMode) msg += '：新建帧 ' + frame.label + '，父帧 = ' + frame.parent + '（这个函数是在 ' + frame.parent + ' 中创建的）';
       this.rec.note(msg, 'call');
       this.step(node ? node.line : this.curLine, 'call');
       if (newTarget && f.isClass && !f.parentClass) this.initFields(f, thisV);
@@ -573,6 +608,10 @@
       if (!(newTarget && rv === undefined)) this.rec.note(name + ' 返回 ' + this.shortInspect(rv), 'ret');
       this.step(r instanceof Ret ? r.line : (node ? node.endLine || node.line : this.curLine), 'return');
       this.frames.pop();
+      frame.exited = true;
+      frame.scope = sc;
+      this.builtinDepth = saveBD;
+      if (this.envMode && (sc.captured || (!fromBuiltin && (this.keptPlain = (this.keptPlain || 0) + 1) <= 25))) this.exitedFrames.push(frame);
       VER++;
       return rv;
     }
@@ -669,7 +708,7 @@
             }
             let v;
             if (p.kind === 'method') { v = this.makeFunction(p.value, this.scope, o); v.fname = key; }
-            else { v = this.eval(p.value); if (v instanceof JSFunc && !v.fname) v.fname = key; }
+            else { v = this.eval(p.value); if (v instanceof JSFunc && !v.fname && (p.value.type === 'Function' || p.value.type === 'Class')) v.fname = key; }
             o.props.set(key, new Slot(v));
           }
           return o;

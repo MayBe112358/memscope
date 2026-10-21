@@ -17,7 +17,7 @@
 
   const S = {
     lang: 'c', exId: null, result: null, idx: 0, lastIdx: -1, playing: null, stale: false,
-    settings: { showLiterals: false, showAddr: false, markers: true, collapseNull: true, heapTree: true, showFuncs: false, animate: true, maxSteps: 5000 },
+    settings: { showLiterals: false, showAddr: false, markers: true, collapseNull: true, heapTree: true, showFuncs: false, animate: true, maxSteps: 5000, envMode: 'auto' },
     codes: {}, inputs: {},
   };
   let ed, viz;
@@ -123,12 +123,60 @@
   }
 
   // ================= run =================
-  function run() {
+  // ---- CS61A 环境图模式 ----
+  const ENV_LANGS = { python: 1, js: 1, ts: 1 };
+  function envAuto(lang, code) {
+    const src = code.replace(/(["'`])(?:\\.|(?!\1)[^\\\n])*\1/g, '""').replace(lang === 'python' ? /#.*$/gm : /\/\/.*$/gm, '');
+    if (lang === 'python') {
+      if (/\blambda\b|\bnonlocal\b/.test(src)) return true;
+      const lines = src.split('\n');
+      const defs = [];
+      for (let i = 0; i < lines.length; i++) {
+        const m = /^(\s*)def\s+(\w+)/.exec(lines[i]);
+        if (!m) continue;
+        defs.push(m[2]);
+        if (m[1].length) {   // 缩进的 def：看它外面一层是 def（嵌套函数）还是 class（方法）
+          for (let j = i - 1; j >= 0; j--) {
+            const mm = /^(\s*)(\S+)/.exec(lines[j]);
+            if (!mm || mm[1].length >= m[1].length) continue;
+            if (mm[2] === 'def' || mm[2] === 'async') return true;
+            break;
+          }
+        }
+      }
+      // 函数名被当成值使用（作为参数传递、赋值、返回、装饰器）
+      for (const d of defs) {
+        const re = new RegExp('\\b' + d + '\\b(?!\\s*\\()', 'g');
+        if (re.test(src)) return true;
+      }
+      return false;
+    }
+    // JS / TS：函数里返回函数、或闭包计数器之类
+    if (/return\s+(function\b|\(?[\w\s,]*\)?\s*=>)/.test(src)) return true;
+    if (/function\s+\w+\s*\([^)]*\)\s*\{[^}]*function\s+\w+/.test(src)) return true;
+    return false;
+  }
+  function envEffective() {
+    if (!ENV_LANGS[S.lang]) return false;
+    if (S.settings.envMode === 'on') return true;
+    if (S.settings.envMode === 'off') return false;
+    return envAuto(S.lang, ed.value);
+  }
+  function updateEnvChip(on) {
+    const c = $('envChip');
+    c.hidden = !ENV_LANGS[S.lang];
+    c.setAttribute('aria-pressed', String(!!on));
+    c.textContent = '环境图' + (S.settings.envMode === 'auto' ? (on ? '（自动开启）' : '') : '');
+  }
+  function run(keepIdx) {
     stop();
     persist();
     const code = ed.value;
     const args = $('argsIn').value.trim() ? $('argsIn').value.trim().split(/\s+/) : [];
-    const opts = { args, stdin: $('stdinIn').value, maxSteps: +S.settings.maxSteps, progName: './main' };
+    const envOn = envEffective();
+    updateEnvChip(envOn);
+    const opts = { args, stdin: $('stdinIn').value, maxSteps: +S.settings.maxSteps, progName: './main', envMode: envOn };
+    const oldIdx = S.idx;
     let res;
     const t0 = performance.now();
     try { res = DSV.langs[S.lang].run(code, opts); }
@@ -143,7 +191,7 @@
     $('tl').max = Math.max(0, res.steps.length - 1);
     if (res.compileError || !res.steps.length) { showCompileError(res); return; }
     drawTimeline();
-    go(0, true);
+    go(keepIdx === true ? Math.min(oldIdx || 0, res.steps.length - 1) : 0, true);
   }
   function showCompileError(res) {
     const ce = res.compileError;
@@ -214,15 +262,16 @@
     const ex = currentExample();
     if (S.idx === 0 && ex && ex.desc && !S.stale && ed.value === ex.code) h += '<div class="desc">' + esc(ex.desc) + '</div>';
     if (prev && prev.ev === 'call') h += '<div class="lineinfo">刚进入函数 <code>' + esc(prev.fn || '') + '</code>，参数已经放进它的栈帧。</div>';
-    else if (prev && prev.ev === 'return') h += '<div class="lineinfo">函数 <code>' + esc(prev.fn || '') + '</code> 已经返回，它的栈帧被销毁，回到调用它的地方继续执行。</div>';
+    else if (prev && prev.ev === 'return') h += '<div class="lineinfo">函数 <code>' + esc(prev.fn || '') + '</code> 已经返回，回到调用它的地方继续执行' + (st.snap.envMode ? '（它的帧变灰后仍留在环境图里）。' : '，它的栈帧被销毁。') + '</div>';
     else if (prev && prev.line) {
       const t = ed.lineText(prev.line);
       h += '<div class="lineinfo">刚执行完第 ' + prev.line + ' 行' + (t ? '：<code>' + esc(t) + '</code>' : '') + '</div>';
     } else if (S.idx === 0) h += '<div class="lineinfo">程序从这里开始运行。按 <b>▶</b>（或键盘 →）执行下一步，按 <b>◀</b> 可以随时倒回去。</div>';
     const msgs = (st.msgs || []).filter(m => m.cls !== 'error');
     if (msgs.length) h += '<ul class="msgs">' + msgs.map(m => '<li class="' + m.cls + '">' + esc(m.text) + '</li>').join('') + '</ul>';
-    if (st.ev === 'call') h += '<div class="lineinfo">调用栈上新开了一个帧，参数已经复制进去。</div>';
-    if (st.ev === 'return') h += '<div class="lineinfo">函数即将返回，返回值显示在帧的底部；返回后这个帧和它的局部变量都会消失。</div>';
+    const envm = st.snap && st.snap.envMode;
+    if (st.ev === 'call') h += '<div class="lineinfo">' + (envm ? '新建了一个帧，参数已经绑定到这个帧里。帧标题里的 parent 决定了找不到的变量要去哪里找。' : '调用栈上新开了一个帧，参数已经复制进去。') + '</div>';
+    if (st.ev === 'return') h += '<div class="lineinfo">' + (envm ? '函数即将返回，返回值显示在帧底部的 Return value。返回后这个帧变灰但不会从图里消失：如果有函数的 parent 指向它（闭包），它里面的变量之后还会被用到。' : '函数即将返回，返回值显示在帧的底部；返回后这个帧和它的局部变量都会消失。') + '</div>';
     if (st.err) h += '<div class="errbox"><b>' + esc(st.err.msg) + '</b>' + (st.err.hint ? '<p>' + esc(st.err.hint) + '</p>' : '') + '</div>';
     if (st.ev !== 'end' && st.ev !== 'error' && st.line) {
       const t = ed.lineText(st.line);
@@ -380,6 +429,9 @@
       $(id).checked = !!S.settings[map[id]];
       $(id).addEventListener('change', () => { S.settings[map[id]] = $(id).checked; persist(); if (S.result && S.result.steps.length) renderStep(false); });
     }
+    $('optEnv').value = S.settings.envMode || 'auto';
+    $('optEnv').addEventListener('change', () => { S.settings.envMode = $('optEnv').value; persist(); run(true); });
+    $('envChip').onclick = () => { S.settings.envMode = envEffective() ? 'off' : 'on'; $('optEnv').value = S.settings.envMode; persist(); run(true); };
     $('optSteps').value = String(S.settings.maxSteps);
     $('optSteps').addEventListener('change', () => { S.settings.maxSteps = +$('optSteps').value; persist(); run(); });
   }

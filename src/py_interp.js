@@ -143,7 +143,13 @@
       this.builtins = new Map();
       this.setupBuiltins();
       this.globalEnv = new Env(null, 'module');
+      this.globalEnv.label = 'Global';
       this.globalEnv.vars.set('__name__', '__main__');
+      // CS61A 环境图模式：帧编号、父帧、保留已返回的帧
+      this.envMode = !!this.opts.envMode;
+      this.callSeq = 0;
+      this.exitedFrames = [];
+      this._noted = null;
       this.hidden = new Set(['__name__']);
       this.handling = [];
     }
@@ -441,7 +447,21 @@
       const defaults = def.params.map(p => p.def ? this.eval(p.def) : undefined);
       const fn = new PyFunc(def, this.env, defaults);
       fn.qualname = this.env.kind === 'class' ? null : def.name;
+      let pe = this.env;
+      while (pe && !pe.label) pe = pe.parent;
+      fn.parentLabel = pe ? pe.label : 'Global';
+      if (pe && pe.kind === 'function') pe.captured = true;
+      if (this.envMode && this.env.kind !== 'class') {
+        if (def.isLambda) this.rec.note('创建 λ 函数（第 ' + def.line + ' 行），父帧 = ' + fn.parentLabel + '（创建它时所在的帧）', 'info');
+        else this.rec.note('定义函数 ' + def.name + '：创建函数对象，父帧 = ' + fn.parentLabel + '（定义它时所在的帧）', 'info');
+      }
       return fn;
+    }
+    envNote(key, text) {
+      if (this._notedStep !== this.rec.steps.length) { this._notedStep = this.rec.steps.length; this._noted = new Set(); }
+      if (this._noted.has(key)) return;
+      this._noted.add(key);
+      this.rec.note(text, 'info');
     }
 
     // ================= names =================
@@ -453,7 +473,10 @@
           const info = e.info;
           if (info.globals.has(name)) return this.lookupGlobal(name);
           if (info.locals.has(name)) {
-            if (e.vars.has(name)) return e.vars.get(name);
+            if (e.vars.has(name)) {
+              if (e !== env && this.envMode && e.label && env.label) this.envNote(name, '当前帧 ' + env.label + ' 里没有 ' + name + '，沿父帧往上找，在 ' + e.label + ' 中找到 ' + name + ' = ' + this.shortRepr(e.vars.get(name)));
+              return e.vars.get(name);
+            }
             if (e === env) this.raise('UnboundLocalError', "cannot access local variable '" + name + "' where it is not associated with a value");
             this.raise('NameError', "free variable '" + name + "' referenced before assignment");
           }
@@ -480,7 +503,7 @@
       if (env.kind === 'function') {
         if (env.info.globals.has(name)) { this.globalEnv.vars.set(name, v); return; }
         if (env.info.nonlocals.has(name)) {
-          for (let e = env.parent; e; e = e.parent) if (e.kind === 'function' && (e.vars.has(name) || e.info.locals.has(name))) { e.vars.set(name, v); return; }
+          for (let e = env.parent; e; e = e.parent) if (e.kind === 'function' && (e.vars.has(name) || e.info.locals.has(name))) { e.vars.set(name, v); VER++; if (this.envMode && e.label) this.envNote('nl:' + name, 'nonlocal：修改的是父帧 ' + e.label + ' 里的 ' + name + '（不是在当前帧新建变量）'); return; }
           this.raise('SyntaxError', "no binding for nonlocal '" + name + "' found");
         }
       }
@@ -685,7 +708,7 @@
         if (f.fn instanceof PyFunc) return this.callFunc(f.fn, [f.self, ...args], kwargs);
         return this.callValue(f.fn, [f.self, ...args], kwargs, e);
       }
-      if (f instanceof PyBuiltin) { VER++; const r = f.fn(args, kwargs, e); VER++; return r; }
+      if (f instanceof PyBuiltin) { VER++; const sv = this.builtinDepth || 0; this.builtinDepth = sv + 1; let r; try { r = f.fn(args, kwargs, e); } finally { this.builtinDepth = sv; } VER++; return r; }
       if (f instanceof PyClass) return this.instantiate(f, args, kwargs, e);
       if (f instanceof PyObj) { const m = f.cls.lookup('__call__'); if (m) return this.callValue(this.bind(f, m), args, kwargs, e); }
       let hint;
@@ -748,14 +771,20 @@
         this.raise('TypeError', this.fnName(fn) + '() takes ' + (isMethod ? n : n) + ' positional argument' + (n !== 1 ? 's' : '') + ' but ' + args.length + (args.length === 1 ? ' was' : ' were') + ' given', isMethod ? '定义方法时第一个参数必须是 self；调用时 self 会自动传入，不需要再写。' : '调用时传入的参数比函数定义的多。');
       }
       for (const k of kwargs.keys()) if (!used.has(k) && !params.some(p => p.kind === 'kwargs')) this.raise('TypeError', this.fnName(fn) + "() got an unexpected keyword argument '" + k + "'");
-      const name = this.fnName(fn);
-      const frame = { id: 'f' + (++NID), name, env, fn, line: def.line, callLine: this.curLine };
+      const name = def.isLambda ? 'λ' : this.fnName(fn);
+      const fromBuiltin = (this.builtinDepth || 0) > 0;
+      const saveBD = this.builtinDepth || 0;
+      this.builtinDepth = 0;
+      const seq = ++this.callSeq;
+      env.label = 'f' + seq;
+      const frame = { id: 'f' + (++NID), name, env, fn, line: def.line, callLine: this.curLine, seq, label: 'f' + seq, parent: fn.parentLabel || 'Global' };
       if (def.info.hasYield) frame.yields = [];
       const argsShown = params.filter(p => env.vars.has(p.name) && p.name !== 'self').map(p => this.shortRepr(env.vars.get(p.name)));
       let msg = '调用 ' + name + '(' + argsShown.join(', ') + ')';
       const depth = this.frames.filter(f => f.fn === fn).length;
       if (depth) msg += '（递归，第 ' + (depth + 1) + ' 层）';
-      if (!def.isLambda || true) this.rec.note(msg, 'call');
+      if (this.envMode) msg += '：新建帧 ' + frame.label + '，父帧 = ' + frame.parent + '（' + (def.isLambda ? '这个 λ 函数' : name) + ' 是在 ' + frame.parent + ' 中' + (def.isLambda ? '创建' : '定义') + '的）';
+      this.rec.note(msg, 'call');
       this.frames.push(frame);
       VER++;
       this.step(def.line, 'call');
@@ -768,6 +797,9 @@
       this.rec.note(name + ' 返回 ' + this.shortRepr(rv), 'ret');
       this.step(r instanceof Ret ? r.line : (def.endLine || def.line), 'return');
       this.frames.pop();
+      frame.exited = true;
+      this.builtinDepth = saveBD;
+      if (this.envMode && (env.captured || (!fromBuiltin && (this.keptPlain = (this.keptPlain || 0) + 1) <= 25))) this.exitedFrames.push(frame);
       VER++;
       return rv;
     }
@@ -775,7 +807,7 @@
     shortRepr(v) {
       try {
         if (v instanceof PyObj && !v.cls.lookup('__repr__')) return v.cls.name + ' 对象';
-        if (v instanceof PyFunc) return 'function ' + v.name;
+        if (v instanceof PyFunc) return v.def.isLambda ? 'λ 函数（第 ' + v.def.line + ' 行）' : 'function ' + v.name;
         const s = this.reprNoCall(v);
         return s.length > 40 ? s.slice(0, 37) + '…' : s;
       } catch (e) { return '…'; }
